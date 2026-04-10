@@ -14,7 +14,12 @@ set -g @opencode-sessions-prefix "false"
 set -g @opencode-sessions-popup-height "80%"
 set -g @opencode-sessions-popup-width "80%"
 set -g @opencode-sessions-key "o"
+set -g @opencode-sessions-popup-border "false"
 
-# Key binding - reads key and popup options from tmux options at runtime
-# Uses -n for no-prefix binding
-bind-key -n "#{@opencode-sessions-key}" run-shell -b "tmux display-popup -w '#{@opencode-sessions-popup-width}' -h '#{@opencode-sessions-popup-height}' -xC -yC -E 'bash -c ${CURRENT_DIR}/bin/opencode_sessions.sh'"
+# FZF options - passed as single string
+set -g @opencode-sessions-fzf-opts "--height 80% --ansi --layout=reverse"
+
+# Key binding - reads options from tmux at runtime
+# Uses -n for no-prefix binding, -B to remove border if configured
+bind-key -n "#{@opencode-sessions-key}" run-shell -b "tmux display-popup #{?@opencode-sessions-popup-border,-B,} -w '#{@opencode-sessions-popup-width}' -h '#{@opencode-sessions-popup-height}' -xC -yC -E ${CURRENT_DIR}/bin/opencode_sessions.sh"
+
