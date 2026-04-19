@@ -89,15 +89,15 @@ invalid_popup_flag() {
 }
 
 # Toggle: cycle through views
+# Toggle: produce the reload command for fzf
+# Returns: bash script that fzf will run via reload
 # default ↔ --directories ↔ --dir
-handle_toggle_view() {
-	# Cycle: default → directories → sessions (with selected dir)
-	# From --dir view: go to directories
+get_toggle_cmd() {
 	if [[ -n "$DIR_FILTER" ]]; then
 		# Was in filtered sessions (--dir), go to directories
 		echo "bash '${0}' --directories"
 	elif [[ "$MODE" == "directories" ]]; then
-		# Was in directories, go to sessions with that dir
+		# Was in directories, go to sessions with that dir (or default)
 		if [[ -n "$DIR_FROM_DIRECTORIES" ]]; then
 			echo "bash '${0}' --dir '${DIR_FROM_DIRECTORIES}'"
 		else
@@ -109,11 +109,27 @@ handle_toggle_view() {
 	fi
 }
 
+# Get enter action for directory selection
+get_enter_dir_cmd() {
+	local dir="$1"
+	if is_in_tmux; then
+		echo "bash '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new '${dir}'"
+	else
+		echo "bash '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tty '${dir}'"
+	fi
+}
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--toggle-view)
-		# Handle Alt-D toggle - cycle through views
-		exec bash $(handle_toggle_view)
+		# Cycle between views - output toggle command and exit (fzf reload replaces process)
+		eval $(get_toggle_cmd)
+		exit 0
+		;;
+	--select-dir)
+		# Select directory to show sessions
+		SELECTED_DIR="$2"
+		shift 2
 		;;
 	--list)
 		MODE="list"
@@ -262,7 +278,8 @@ run_interactive_directories() {
 
 	# For directories: Enter to view sessions in that directory
 	# Alt-D to return to default sessions view
-	footer="Enter: load dir | Alt-D: return | ?: preview"
+	footer="Enter: filter sessions | Alt-D: return | ?: preview"
+	local enter_cmd="enter:change-prompt(Sessions> )+reload(bash '${0}' --dir-from-directories '\$(echo {} | cut -f1)')"
 	local selected
 	selected=$(format_directory <"$cache_file" | fzf \
 		$FZF_OPTS \
@@ -272,10 +289,11 @@ run_interactive_directories() {
 		--preview "bash '${DIR_PREVIEW_SCRIPT}' {}" \
 		--preview-window "right:50%,border-left" \
 		--delimiter '\t' \
-		--prompt="Select dir: " \
+		--prompt="Dirs> " \
 		--footer "$footer" \
 		--bind "?:toggle-preview" \
 		--bind "alt-d:reload(bash '${0}' --toggle-view)" \
+		--bind "$enter_cmd" \
 		2>/dev/null) || true
 
 	[[ -z "$selected" ]] && exit 0
@@ -288,11 +306,12 @@ run_interactive_directories() {
 
 	# Handle Alt-D toggle (return to default)
 	if [[ "$key_pressed" == "alt-d" ]]; then
-		exec bash "${0}" --toggle-view
+		export DIR_FROM_DIRECTORIES="$directory"
+		eval $(get_toggle_cmd)
+		exit 0
 	fi
 
-	# Enter pressed - show sessions in this directory
-	# Pass directory via env var for toggle back
+	# Enter pressed - reload to sessions filtered by this directory
 	export DIR_FROM_DIRECTORIES="$directory"
 	exec bash "${0}" --dir "$directory"
 }
@@ -331,8 +350,16 @@ run_interactive_sessions() {
 		enter_action="enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tty \$(echo {} | cut -f1))"
 	fi
 
+	# Custom prompt for directory-filtered view
+	local prompt="Select: "
+	local border_label=" Sessions "
+	if [[ -n "$dir_filter" ]]; then
+		local short_dir="${dir_filter##*/}"
+		prompt="[${short_dir}] "
+		border_label=" Sessions [${short_dir}] "
+	fi
+
 	footer="Enter: resume | Alt-D: directories | Alt+Y: copy | ?: preview"
-	[[ -n "$dir_filter" ]] && footer="[DIR] $footer (Alt-D: directories)"
 
 	local selected
 	selected=$(
@@ -340,14 +367,14 @@ run_interactive_sessions() {
 			$FZF_OPTS \
 			--expect=ctrl-o \
 			--with-nth 2.. \
-			--border-label " Sessions " \
+			--border-label "$border_label" \
 			--preview "bash '${PREVIEW_SCRIPT}' {}" \
 			--preview-window "right:60%,border-left" \
 			--delimiter '\t' \
-			--prompt="Select: " \
+			--prompt="$prompt" \
 			--footer "$footer" \
 			--bind "?:toggle-preview" \
-			--bind "alt-d:reload(bash '${0}' --toggle-view)" \
+--bind "alt-d:change-prompt(Dirs> )+reload(bash '${0}' --toggle-view)" \
 			--bind "alt-y:execute(echo {1} | $(copy_to_clipboard))" \
 			--bind "$enter_action" \
 			2>/dev/null
