@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# preview.sh - Preview helper for opencode-sessions-fzf.sh
+# preview.sh - Dynamically fetches preview info for opencode sessions
 # Usage: bash preview.sh "<tab-delimited fzf line>"
 #
-# Expected input format:
-# session_id\tstatus\ttime_ago\trepo\ttitle\tmodel\tdirectory\tchild_count
+# Input format (minimal): session_id|title|directory|time_updated|name
+# This script dynamically queries all extra information from the DB
 
 set -euo pipefail
 
 DB_PATH="${HOME}/.local/share/opencode/opencode.db"
 
-# Color codes (self-contained, no dependency on parent shell)
+# Color codes (self-contained)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -20,7 +20,7 @@ DIM='\033[2m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# Parse input - fzf passes the full line, we extract session_id from first field
+# Parse input - extract session_id from first field
 INPUT="${1:-}"
 SESSION_ID="${INPUT%%	*}" # First tab-delimited field
 
@@ -29,7 +29,9 @@ if [[ -z "$SESSION_ID" ]]; then
 	exit 0
 fi
 
-# Get session details from DB
+# ─── Dynamic DB queries for preview info ──────────────────────────────────────────
+
+# Get all session details
 SESSION_DATA=$(sqlite3 -separator '|' "$DB_PATH" "
     SELECT s.id, s.title, s.directory, s.time_updated, s.time_created,
            s.permission, p.worktree, p.name
@@ -45,7 +47,7 @@ fi
 
 IFS='|' read -r id title directory time_updated time_created permission worktree project_name <<<"$SESSION_DATA"
 
-# Get status (recompute for accuracy in preview)
+# Get status (from latest message + parts)
 STATUS=$(sqlite3 "$DB_PATH" "
     SELECT CASE
         WHEN (
@@ -58,16 +60,6 @@ STATUS=$(sqlite3 "$DB_PATH" "
                   SELECT id FROM message WHERE session_id = '${SESSION_ID}'
                   ORDER BY time_created DESC LIMIT 1
               )
-        ) > 0 THEN 'needs-input'
-        WHEN (
-            SELECT COUNT(*) FROM part p
-            JOIN message m ON m.id = p.message_id
-            JOIN session s ON s.id = m.session_id
-            WHERE s.parent_id = '${SESSION_ID}'
-              AND s.time_archived IS NULL
-              AND json_extract(p.data, '\$.type') = 'tool'
-              AND json_extract(p.data, '\$.tool') IN ('question','plan_exit')
-              AND json_extract(p.data, '\$.state.status') = 'running'
         ) > 0 THEN 'needs-input'
         WHEN (
             SELECT COUNT(*) FROM part p
@@ -106,7 +98,7 @@ idle) STATUS_ICON="${DIM}⚪${RESET} ${DIM}idle${RESET}" ;;
 *) STATUS_ICON="${DIM}⚪${RESET} ${DIM}unknown${RESET}" ;;
 esac
 
-# Model
+# Model (from latest assistant message)
 MODEL=$(sqlite3 "$DB_PATH" "
     SELECT json_extract(data, '\$.modelID')
     FROM message
@@ -116,7 +108,7 @@ MODEL=$(sqlite3 "$DB_PATH" "
     ORDER BY time_created DESC LIMIT 1;
 " 2>/dev/null) || true
 
-# Shorten model
+# Shorten model name
 if [[ -n "$MODEL" ]]; then
 	[[ "$MODEL" == *"/"* ]] && MODEL="${MODEL##*/}"
 	MODEL="${MODEL#claude-}"
@@ -141,7 +133,7 @@ else
 	TIME_AGO=$(date -d "@$((time_updated / 1000))" '+%Y-%m-%d' 2>/dev/null || echo "$time_updated")
 fi
 
-# Child session count
+# Child session count (if needed)
 CHILD_COUNT=$(sqlite3 "$DB_PATH" "
     SELECT COUNT(*) FROM session
     WHERE parent_id = '${SESSION_ID}' AND time_archived IS NULL;
@@ -161,12 +153,12 @@ LAST_MSG=$(sqlite3 "$DB_PATH" "
     LIMIT 1;
 " 2>/dev/null) || true
 [[ -z "$LAST_MSG" ]] && LAST_MSG="${DIM}(no messages)${RESET}"
-# Truncate to 300 chars
+# Truncate
 if [[ ${#LAST_MSG} -gt 300 ]]; then
 	LAST_MSG="${LAST_MSG:0:300}${DIM}...${RESET}"
 fi
 
-# Modified files
+# Modified files (distinct)
 MODIFIED_FILES=$(sqlite3 "$DB_PATH" "
     SELECT DISTINCT
       COALESCE(
@@ -221,16 +213,9 @@ else
 fi
 echo ""
 
-# Child sessions
-if [[ -n "$CHILD_SESSIONS" ]]; then
-	echo -e "${BOLD}${WHITE}Child Sessions:${RESET}"
-	echo "$CHILD_SESSIONS" | while IFS='|' read -r cid ctitle cdir; do
-		local_repo="${cdir##*/}"
-		echo -e "  ${MAGENTA}${ctitle}${RESET} ${DIM}(${local_repo})${RESET}"
-	done
-	if ((CHILD_COUNT > 5)); then
-		echo -e "  ${DIM}... and $((CHILD_COUNT - 5)) more${RESET}"
-	fi
+# Child sessions (only show count, not the list itself since you said you don't need child session info)
+if [[ "$CHILD_COUNT" -gt 0 ]]; then
+	echo -e "${BOLD}${WHITE}Child Sessions:${RESET} ${DIM}${CHILD_COUNT} child session(s) (info only)${RESET}"
 else
 	echo -e "${BOLD}${WHITE}Child Sessions:${RESET} ${DIM}(none)${RESET}"
 fi

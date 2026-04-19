@@ -1,390 +1,585 @@
 #!/usr/bin/env bash
-# opencode_sessions.sh - TPM plugin entry point for browsing opencode sessions
+# opencode_sessions.sh - Browse opencode sessions with fzf
 #
 # Usage:
-#   ./bin/opencode_sessions.sh              # Interactive mode with fzf in tmux popup
-#   ./bin/opencode_sessions.sh --list       # List sessions without fzf
-#   ./bin/opencode_sessions.sh --copy       # Copy selected session ID to clipboard
-#   ./bin/opencode_sessions.sh --multi      # Multi-select mode
-#   ./bin/opencode_sessions.sh --filter working  # Only show working sessions
-#   ./bin/opencode_sessions.sh --sort status     # Start sorted by status
+#   ./bin/opencode_sessions.sh              # Interactive - sessions
+#   ./bin/opencode_sessions.sh --list         # List sessions
+#   ./bin/opencode_sessions.sh --list --directories  # List all directories
 #
-# Dependencies: sqlite3, fzf, opencode
+# Key shortcuts in interactive mode:
+#   Enter   - Resume session (cd + exec in tty, new session in tmux)
+#   Ctrl-O  - Open in new tmux window (tmux only)
+#   Alt-D   - Toggle between sessions and directories view
+#   Alt-Y   - Copy session ID to clipboard
+#   ?       - Toggle preview
 
 set -euo pipefail
 
-# ─── Script directory resolution ──────────────────────────────────────────────
-# Handle both direct execution and TPM sourcing
+# ─── Script directory ────────────────────────────────────────────────────────────────
 if [[ -n "${TMUX_PLUGIN:-}" ]]; then
-  # Running as TPM plugin - use plugin directory
-  SCRIPT_DIR="${TMUX_PLUGIN}"
+	SCRIPT_DIR="${TMUX_PLUGIN}"
 else
-  # Running directly - resolve relative to script location
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
+	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 fi
 
-# ─── Source library modules ───────────────────────────────────────────────────
 source "${SCRIPT_DIR}/lib/colors.sh"
 source "${SCRIPT_DIR}/lib/helpers.sh"
 source "${SCRIPT_DIR}/lib/db.sh"
-source "${SCRIPT_DIR}/lib/format.sh"
 
-# ─── Configuration ──────────────────────────────────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────────
 DB_PATH="${HOME}/.local/share/opencode/opencode.db"
 PREVIEW_SCRIPT="${SCRIPT_DIR}/scripts/preview.sh"
+DIR_PREVIEW_SCRIPT="${SCRIPT_DIR}/scripts/dir_preview.sh"
 
-# Read tmux options with fallbacks
 get_tmux_option() {
-  local option="$1"
-  local default="$2"
-  local value
-  value=$(tmux show-option -gqv "$option" 2>/dev/null)
-  echo "${value:-$default}"
+	local option="$1"
+	local default="$2"
+	local value
+	value=$(tmux show-option -gqv "$option" 2>/dev/null)
+	echo "${value:-$default}"
+}
+
+is_in_tmux() { [[ -n "${TMUX:-}" ]]; }
+get_current_tmux_session() {
+	if is_in_tmux; then tmux display-message -p '#S' 2>/dev/null; fi
 }
 
 DAYS_FILTER=$(get_tmux_option "@opencode-sessions-days" "7")
-SORT_BY=$(get_tmux_option "@opencode-sessions-sort" "time")
-
-# FZF options - passed as single string of options
 FZF_OPTS=$(get_tmux_option "@opencode-sessions-fzf-opts" "--height 100% --ansi --layout=reverse --border")
 
-# ─── Argument parsing ─────────────────────────────────────────────────────────
-MODE="interactive"
-FILTER_STATUS=""
-SHOW_ALL=false
-DIR_FILTER=""
+# Check if running inside a popup (to prevent recursive popup spawns)
+if [[ "${OPENCODE_POPUP:-}" == "1" ]]; then
+	IS_POPUP=true
+else
+	IS_POPUP=false
+fi
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-  --list)
-    MODE="list"
-    shift
-    ;;
-  --copy)
-    MODE="copy"
-    shift
-    ;;
-  --multi)
-    MODE="multi"
-    shift
-    ;;
-  --filter)
-    FILTER_STATUS="$2"
-    shift 2
-    ;;
-  --sort)
-    SORT_BY="$2"
-    shift 2
-    ;;
-  --days)
-    DAYS_FILTER="$2"
-    shift 2
-    ;;
-  --all)
-    SHOW_ALL=true
-    shift
-    ;;
-  --dir)
-    DIR_FILTER="$2"
-    shift 2
-    ;;
-  -h | --help)
-    echo "Usage: $0 [OPTIONS]"
-    echo ""
-    echo "Options:"
-    echo "  --list          List sessions without fzf"
-    echo "  --copy          Copy selected session ID to clipboard"
-    echo "  --multi         Multi-select mode (TAB to mark)"
-    echo "  --filter STATUS Filter by: working, needs-input, error, idle"
-    echo "  --sort FIELD    Initial sort: time (default), directory, status"
-    echo "  --dir DIR       Filter by specific directory (exact match)"
-    echo "  --days N        Show sessions from last N days (default: 14)"
-    echo "  --all           Show all sessions regardless of age"
-    echo "  -h, --help      Show this help"
-    exit 0
-    ;;
-  *)
-    echo "Unknown option: $1" >&2
-    exit 1
-    ;;
-  esac
+# In popup mode, default to sessions view unless --directories is passed
+# This allows the reload binding to work
+if [[ "$IS_POPUP" == "true" ]] && [[ "$MODE" == "interactive" ]]; then
+	# In popup interactive mode - will be handled in main
+	:
+fi
+
+# ─── Argument parsing ────────────────────────────────────────────────────────
+MODE="interactive" # sessions | directories
+SHOW_ALL=true      # Default to show all, use --days to limit
+DIR_FILTER=""
+DAYS_OVERRIDE="" # If --days specified, use this instead of tmux option
+TMUX_POPUP=false
+POPUP_WIDTH="80%"
+POPUP_HEIGHT="80%"
+POPUP_BORDER=false
+
+# Pre-scan for --tmux to determine if popup options are allowed
+TMUX_FLAG_SEEN=false
+for arg in "$@"; do
+	[[ "$arg" == "--tmux" ]] && TMUX_FLAG_SEEN=true
 done
 
-# ─── Validation ───────────────────────────────────────────────────────────────
-if [[ ! -f "$DB_PATH" ]]; then
-  echo -e "${RED}Error: opencode database not found at ${DB_PATH}${RESET}" >&2
-  echo "Run opencode at least once to create the database." >&2
-  exit 1
+# Auto-detect tmux: if running inside tmux and --tmux not explicitly passed, use popup mode
+if is_in_tmux && [[ "$TMUX_FLAG_SEEN" != "true" ]]; then
+	TMUX_POPUP=true
 fi
 
-if ! command -v sqlite3 &>/dev/null; then
-  echo -e "${RED}Error: sqlite3 is required but not installed${RESET}" >&2
-  exit 1
+# Error function for invalid flag combinations
+invalid_popup_flag() {
+	echo "Error: $1 is only available with --tmux flag" >&2
+	exit 1
+}
+
+# Toggle: cycle through views
+# default ↔ --directories ↔ --dir
+handle_toggle_view() {
+	# Cycle: default → directories → sessions (with selected dir)
+	# From --dir view: go to directories
+	if [[ -n "$DIR_FILTER" ]]; then
+		# Was in filtered sessions (--dir), go to directories
+		echo "bash '${0}' --directories"
+	elif [[ "$MODE" == "directories" ]]; then
+		# Was in directories, go to sessions with that dir
+		if [[ -n "$DIR_FROM_DIRECTORIES" ]]; then
+			echo "bash '${0}' --dir '${DIR_FROM_DIRECTORIES}'"
+		else
+			echo "bash '${0}'"
+		fi
+	else
+		# Was in default, go to directories
+		echo "bash '${0}' --directories"
+	fi
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--toggle-view)
+		# Handle Alt-D toggle - cycle through views
+		exec bash $(handle_toggle_view)
+		;;
+	--list)
+		MODE="list"
+		shift
+		;;
+	--all)
+		SHOW_ALL=true
+		shift
+		;;
+	--directories)
+		MODE="directories"
+		shift
+		;;
+	--dir)
+		DIR_FILTER="$2"
+		shift 2
+		;;
+	--dir-from-directories)
+		DIR_FROM_DIRECTORIES="$2"
+		shift 2
+		;;
+	--days)
+		DAYS_OVERRIDE="$2"
+		SHOW_ALL=false # --days overrides the --all default
+		shift 2
+		;;
+	--new-window)
+		NEW_WINDOW_MODE=true
+		shift
+		;;
+	--tmux)
+		TMUX_POPUP=true
+		shift
+		;;
+	--width)
+		[[ "$TMUX_FLAG_SEEN" != "true" ]] && invalid_popup_flag "--width"
+		POPUP_WIDTH="$2"
+		shift 2
+		;;
+	--height)
+		[[ "$TMUX_FLAG_SEEN" != "true" ]] && invalid_popup_flag "--height"
+		POPUP_HEIGHT="$2"
+		shift 2
+		;;
+	--border)
+		[[ "$TMUX_FLAG_SEEN" != "true" ]] && invalid_popup_flag "--border"
+		POPUP_BORDER=true
+		shift
+		;;
+	-h | --help)
+		echo "Usage: $0 [OPTIONS]"
+		echo ""
+		echo "Options:"
+		echo "  --list          List sessions (use with --directories for dirs)"
+		echo "  --directories   Show directories instead of sessions"
+		echo "  --dir DIR       Filter by directory"
+		echo "  --days N        Days to show (default: all)"
+		echo "  --all           Show all sessions"
+		echo "  --tmux          Run in tmux popup window"
+		echo "    --width WIDTH   Popup width (e.g., 80%)"
+		echo "    --height HEIGHT Popup height (e.g., 80%)"
+		echo "    --border        Show popup border"
+		exit 0
+		;;
+	*)
+		echo "Unknown: $1" >&2
+		exit 1
+		;;
+	esac
+done
+
+# ─── Validation ────────────────────────────────────────────────────────────────
+[[ ! -f "$DB_PATH" ]] && {
+	echo -e "${RED}DB not found: $DB_PATH${RESET}"
+	exit 1
+}
+command -v fzf &>/dev/null || {
+	echo -e "${RED}fzf required${RESET}"
+	exit 1
+}
+
+# Compute effective days filter - --days overrides tmux option
+if [[ -n "$DAYS_OVERRIDE" ]]; then
+	DAYS_FILTER="$DAYS_OVERRIDE"
 fi
 
-if ! command -v fzf &>/dev/null; then
-  echo -e "${RED}Error: fzf is required but not installed${RESET}" >&2
-  exit 1
-fi
+# ─── Format functions ────────────────────────────────────────────────────────
+format_session() {
+	while IFS='|' read -r id title dir time_updated name; do
+		now=$(date +%s)
+		diff=$((now - time_updated / 1000))
+		((diff < 60)) && time_ago="${diff}s" || ((diff < 3600)) && time_ago="$((diff / 60))m" ||
+			((diff < 86400)) && time_ago="$((diff / 3600))h" || ((diff < 604800)) && time_ago="$((diff / 86400))d" ||
+			time_ago=$(date -d "@$((time_updated / 1000))" '+%Y-%m-%d' 2>/dev/null || echo "$time_updated")
+		display_name="${name:0:20}"
+		[[ ${#name} -gt 20 ]] && display_name="${display_name:0:17}..."
+		printf '%s\t%s %s %s\n' "$id" "$time_ago" "$display_name" "$title"
+	done
+}
 
-if [[ ! -f "$PREVIEW_SCRIPT" ]]; then
-  echo -e "${RED}Error: preview.sh not found at ${PREVIEW_SCRIPT}${RESET}" >&2
-  exit 1
-fi
+format_directory() {
+	while IFS='|' read -r dir count; do
+		short_dir="${dir##*/}"
+		printf '%s\t%s (%s sessions)\n' "$dir" "$short_dir" "$count"
+	done
+}
 
 # ─── List mode ────────────────────────────────────────────────────────────────
-
 run_list() {
-  # Get counts for display
-  local filtered_count=0
-  local total_count=0
-
-  # Count filtered sessions
-  filtered_count=$(build_session_data query_all_sessions "$FILTER_STATUS" | wc -l)
-
-  # Get total count if filtering
-  if [[ "$SHOW_ALL" != "true" && "$DAYS_FILTER" -gt 0 ]]; then
-    total_count=$(get_total_count "$DB_PATH")
-    if [[ "$filtered_count" != "$total_count" ]]; then
-      echo -e "${DIM}Showing ${filtered_count} of ${total_count} sessions (last ${DAYS_FILTER} days)${RESET}"
-    fi
-  fi
-
-  echo -e "${WHITE}$(printf '%-8s' 'Status') $(printf '%-10s' 'Updated') $(printf '%-20s' 'Repo') Session Title [Model]${RESET}"
-  echo -e "${DIM}$(printf '%.0s─' {1..100})${RESET}"
-
-  build_session_data query_all_sessions "$FILTER_STATUS" | sort_data "$SORT_BY" | format_for_list | while IFS=$'\t' read -r line; do
-    echo -e "$line"
-  done
+	if [[ "$MODE" == "directories" ]]; then
+		query_all_directories "$DB_PATH" | format_directory
+	elif [[ -n "$DIR_FILTER" ]]; then
+		# --dir shows ALL sessions from that directory (no time filter)
+		query_dir_sessions "$DB_PATH" "$DIR_FILTER" | format_session
+	else
+		query_all_sessions "$DB_PATH" "$DAYS_FILTER" "$SHOW_ALL" "$DIR_FILTER" | format_session
+	fi
 }
 
-# ─── Interactive fzf mode ─────────────────────────────────────────────────────
-
+# ─── Interactive mode ────────────────────────────────────────────────────────
 run_interactive() {
-  echo -e "${CYAN}Loading sessions...${RESET}" >&2
-
-  # Cache all session data
-  local cache_file
-  cache_file=$(mktemp)
-  trap 'rm -f "$cache_file"' EXIT
-
-  build_session_data query_all_sessions "$FILTER_STATUS" >"$cache_file"
-
-  if [[ ! -s "$cache_file" ]]; then
-    echo -e "${YELLOW}No sessions found.${RESET}"
-    exit 0
-  fi
-
-  # Get counts for display
-  local filtered_count
-  local total_count=0
-  filtered_count=$(wc -l <"$cache_file")
-
-  if [[ "$SHOW_ALL" != "true" && "$DAYS_FILTER" -gt 0 ]]; then
-    total_count=$(get_total_count "$DB_PATH")
-    if [[ "$filtered_count" != "$total_count" ]]; then
-      echo -e "${DIM}Showing ${filtered_count} of ${total_count} sessions (last ${DAYS_FILTER} days)${RESET}" >&2
-    fi
-  fi
-
-  # Sort the cached data (default: newest first)
-  local sorted_file
-  sorted_file=$(mktemp)
-  trap 'rm -f "$cache_file" "$sorted_file"' EXIT
-  sort_data "$SORT_BY" <"$cache_file" >"$sorted_file"
-
-  local fzf_flags=()
-  if [[ "$MODE" == "multi" ]]; then
-    fzf_flags+=(--multi)
-  fi
-
-  # State file for sort cycling
-  local sort_state_file
-  sort_state_file=$(mktemp)
-  case "$SORT_BY" in
-  time) echo "0" >"$sort_state_file" ;;
-  directory) echo "1" >"$sort_state_file" ;;
-  status) echo "2" >"$sort_state_file" ;;
-  *) echo "0" >"$sort_state_file" ;;
-  esac
-
-  # Cycle script for sort cycling in fzf
-  local cycle_script
-  cycle_script=$(mktemp)
-  trap 'rm -f "$cache_file" "$sorted_file" "$cycle_script" "$sort_state_file" "$cycle_cache"' EXIT
-
-  # Copy cache data to a temp file that cycle script can read
-  local cycle_cache
-  cycle_cache=$(mktemp)
-  cp "$cache_file" "$cycle_cache"
-
-  cat >"$cycle_script" <<CYCLE_EOF
-#!/usr/bin/env bash
-CACHE_FILE="$cycle_cache"
-STATE_FILE="$sort_state_file"
-
-sort_order=("time" "directory" "status")
-
-idx=\$(cat "\$STATE_FILE")
-idx=\$(( (idx + 1) % 3 ))
-echo "\$idx" > "\$STATE_FILE"
-
-sort_field="\${sort_order[\$idx]}"
-
-format_for_display() {
-    while IFS=\$'\\t' read -r id status time_ago repo title model directory child_count; do
-        local icon
-        case "\$status" in
-            needs-input) icon=\$'\\033[0;33m🟡\\033[0m' ;;
-            error)       icon=\$'\\033[0;31m🔴\\033[0m' ;;
-            working)     icon=\$'\\033[0;32m🟢\\033[0m' ;;
-            idle)        icon=\$'\\033[2m⚪\\033[0m' ;;
-            *)           icon=\$'\\033[2m⚪\\033[0m' ;;
-        esac
-        if [[ -n "\$model" ]]; then
-            printf '%s\\t%-8s %-10s %-20s %s [%s]\\n' "\$id" "\$icon" "\$time_ago" "\$repo" "\$title" "\$model"
-        else
-            printf '%s\\t%-8s %-10s %-20s %s\\n' "\$id" "\$icon" "\$time_ago" "\$repo" "\$title"
-        fi
-    done
+	# Determine if we're showing directories or sessions
+	if [[ "$MODE" == "directories" ]]; then
+		run_interactive_directories
+	else
+		run_interactive_sessions "$DIR_FILTER"
+	fi
 }
 
-sort_data() {
-    case "\$1" in
-        time) cat ;;
-        directory) sort -t\$'\\t' -k4,4 -k3,3 ;;
-        status)
-            while IFS=\$'\\t' read -r id status time_ago repo title model directory child_count; do
-                local prio
-                case "\$status" in
-                    working) prio=0 ;; 
-                    idle) prio=1 ;;    
-                    *) prio=2 ;;       
-                esac
-                printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "\$id" "\$prio" "\$time_ago" "\$repo" "\$title" "\$model" "\$directory" "\$child_count"
-            done | sort -t\$'\\t' -k2,2n -k3,3 | while IFS=\$'\\t' read -r id prio time_ago repo title model directory child_count; do
-                local actual_status
-                case "\$prio" in
-                    0) actual_status="working" ;;
-                    1) actual_status="idle" ;;
-                    *) actual_status="dead" ;;
-                esac
-                printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "\$id" "\$actual_status" "\$time_ago" "\$repo" "\$title" "\$model" "\$directory" "\$child_count"
-            done
-            ;;
-    esac
+# ─── Interactive directories mode ───────────────────────────────────────────
+run_interactive_directories() {
+	echo -e "${CYAN}Loading directories...${RESET}" >&2
+
+	cache_file=$(mktemp)
+	trap 'rm -f "$cache_file"' EXIT
+
+	query_all_directories "$DB_PATH" >"$cache_file"
+
+	if [[ ! -s "$cache_file" ]]; then
+		echo -e "${YELLOW}No directories${RESET}"
+		exit 0
+	fi
+
+	count=$(wc -l <"$cache_file")
+	echo -e "${DIM}${count} directories${RESET}" >&2
+
+	# For directories: Enter to view sessions in that directory
+	# Alt-D to return to default sessions view
+	footer="Enter: load dir | Alt-D: return | ?: preview"
+	local selected
+	selected=$(format_directory <"$cache_file" | fzf \
+		$FZF_OPTS \
+		--expect=alt-d \
+		--with-nth 2.. \
+		--border-label " Directories " \
+		--preview "bash '${DIR_PREVIEW_SCRIPT}' {}" \
+		--preview-window "right:50%,border-left" \
+		--delimiter '\t' \
+		--prompt="Select dir: " \
+		--footer "$footer" \
+		--bind "?:toggle-preview" \
+		--bind "alt-d:reload(bash '${0}' --toggle-view)" \
+		2>/dev/null) || true
+
+	[[ -z "$selected" ]] && exit 0
+
+	key_pressed=$(echo "$selected" | head -1)
+	dir_selected=$(echo "$selected" | tail -n +2)
+	directory=$(echo "$dir_selected" | cut -f1)
+
+	[[ -z "$directory" ]] && exit 0
+
+	# Handle Alt-D toggle (return to default)
+	if [[ "$key_pressed" == "alt-d" ]]; then
+		exec bash "${0}" --toggle-view
+	fi
+
+	# Enter pressed - show sessions in this directory
+	# Pass directory via env var for toggle back
+	export DIR_FROM_DIRECTORIES="$directory"
+	exec bash "${0}" --dir "$directory"
 }
 
-sort_data "\$sort_field" < "\$CACHE_FILE" | format_for_display
-CYCLE_EOF
-  chmod +x "$cycle_script"
+# ─── Interactive sessions mode ────────────────────────────────────────────────
+run_interactive_sessions() {
+	local dir_filter="${1:-}"
 
-  # Run fzf with footer and alt-s sort cycling
-  local selected
-  selected=$(format_for_display <"$sorted_file" | fzf \
-    $FZF_OPTS \
-    --with-nth 2.. \
-    --border-label "OpenCode Sessions" \
-    --preview "bash '${PREVIEW_SCRIPT}' {}" \
-    --preview-window "right:60%,border-left" \
-    --delimiter '\t' \
-    --prompt="Select session: " \
-    --footer "Alt-S: cycle sort (current: $SORT_BY) | ↑/↓: navigate | Enter: resume | ?: toggle preview" \
-    --bind "?:toggle-preview" \
-    --bind "alt-s:reload(bash '${cycle_script}')" \
-    "${fzf_flags[@]}" \
-    2>/dev/null) || true
+	echo -e "${CYAN}Loading sessions...${RESET}" >&2
 
-  if [[ -z "$selected" ]]; then
-    echo -e "${DIM}No session selected.${RESET}"
-    exit 0
-  fi
+	cache_file=$(mktemp)
+	sorted_file=$(mktemp)
+	trap 'rm -f "$cache_file" "$sorted_file"' EXIT
 
-  # Extract session ID(s)
-  local session_ids=()
-  while IFS= read -r line; do
-    local sid
-    sid=$(echo "$line" | cut -f1)
-    session_ids+=("$sid")
-  done <<<"$selected"
+	query_all_sessions "$DB_PATH" "$DAYS_FILTER" "$SHOW_ALL" "$dir_filter" >"$cache_file"
 
-  if [[ "$MODE" == "copy" ]]; then
-    local copy_text
-    copy_text=$(printf '%s\n' "${session_ids[@]}")
-    if command -v xclip &>/dev/null; then
-      echo "$copy_text" | xclip -selection clipboard
-    elif command -v pbcopy &>/dev/null; then
-      echo "$copy_text" | pbcopy
-    elif command -v wl-copy &>/dev/null; then
-      echo "$copy_text" | wl-copy
-    else
-      echo -e "${YELLOW}Session IDs:${RESET}"
-      echo "$copy_text"
-      echo -e "${DIM}(No clipboard tool found, copy manually)${RESET}"
-    fi
-    echo -e "${GREEN}Copied ${#session_ids[@]} session ID(s) to clipboard${RESET}"
-    exit 0
-  fi
+	if [[ ! -s "$cache_file" ]]; then
+		echo -e "${YELLOW}No sessions${RESET}"
+		exit 0
+	fi
 
-  # Resume the first selected session with tmux session handling
-  handle_session "${session_ids[0]}"
+	count=$(wc -l <"$cache_file")
+	filter_info=""
+	[[ -n "$dir_filter" ]] && filter_info=" [$dir_filter]"
+	echo -e "${DIM}${count} sessions${filter_info}${RESET}" >&2
+
+	sort -t$'\t' -k2,2nr <"$cache_file" >"$sorted_file"
+
+	# Determine Enter behavior based on context
+	local enter_action
+	if is_in_tmux; then
+		# In tmux: Enter = create new session and switch to it
+		enter_action="enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new \$(echo {} | cut -f1))"
+	else
+		# Not in tmux: Enter = cd to directory and exec opencode
+		enter_action="enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tty \$(echo {} | cut -f1))"
+	fi
+
+	footer="Enter: resume | Alt-D: directories | Alt+Y: copy | ?: preview"
+	[[ -n "$dir_filter" ]] && footer="[DIR] $footer (Alt-D: directories)"
+
+	local selected
+	selected=$(
+		format_session <"$sorted_file" | fzf \
+			$FZF_OPTS \
+			--expect=ctrl-o \
+			--with-nth 2.. \
+			--border-label " Sessions " \
+			--preview "bash '${PREVIEW_SCRIPT}' {}" \
+			--preview-window "right:60%,border-left" \
+			--delimiter '\t' \
+			--prompt="Select: " \
+			--footer "$footer" \
+			--bind "?:toggle-preview" \
+			--bind "alt-d:reload(bash '${0}' --toggle-view)" \
+			--bind "alt-y:execute(echo {1} | $(copy_to_clipboard))" \
+			--bind "$enter_action" \
+			2>/dev/null
+	) || true
+
+	[[ -z "$selected" ]] && echo -e "${DIM}No selection${RESET}" && exit 0
+
+	key_pressed=$(echo "$selected" | head -1)
+	session_line=$(echo "$selected" | tail -n +2)
+	session_id=$(echo "$session_line" | cut -f1)
+
+	[[ -z "$session_id" ]] && exit 0
+
+	# Handle Ctrl-O (new window in tmux)
+	if [[ "$key_pressed" == "ctrl-o" ]] && is_in_tmux; then
+		handle_session_tmux_new_window "$session_id"
+		exit 0
+	fi
+
+	# Normal resume based on context
+	if is_in_tmux; then
+		handle_session_tmux_new "$session_id"
+	else
+		handle_session_tty "$session_id"
+	fi
 }
 
-# ─── Handle tmux session creation/switching ─────────────────────────────────
-
-handle_session() {
-  local session_id="$1"
-
-  # Get session directory from database
-  local directory
-  directory=$(sqlite3 "$DB_PATH" "SELECT directory FROM session WHERE id = '${session_id}';")
-
-  if [[ -z "$directory" ]]; then
-    echo -e "${RED}Error: Could not find directory for session ${session_id}${RESET}"
-    exit 1
-  fi
-
-  if [[ ! -d "$directory" ]]; then
-    echo -e "${RED}Error: Directory does not exist: ${directory}${RESET}"
-    exit 1
-  fi
-
-  # Derive tmux session name from directory
-  local session_name
-  session_name=$(derive_repo_name "$directory")
-
-  # Check if prefix should be used (default: false)
-  local use_prefix
-  use_prefix=$(get_tmux_option "@opencode-sessions-prefix" "false")
-  if [[ "$use_prefix" != "false" ]]; then
-    session_name="${use_prefix}${session_name}"
-  fi
-
-  echo -e "${GREEN}Resuming session: ${session_id}${RESET}"
-  echo -e "${DIM}Directory: ${directory}${RESET}"
-  echo -e "${DIM}Tmux session: ${session_name}${RESET}"
-
-  # Check if tmux session already exists
-  if tmux has-session -t "$session_name" 2>/dev/null; then
-    # Session exists - create new window instead of switching
-    echo -e "${DIM}Creating new window in existing tmux session${RESET}"
-    tmux new-window -t "$session_name" -c "$directory" -n "opencode" "exec opencode -s ${session_id}"
-    tmux switch-client -t "$session_name"
-  else
-    # Create new tmux session and run resume directly
-    echo -e "${DIM}Creating new tmux session${RESET}"
-    tmux new-session -d -s "$session_name" -c "$directory" "exec opencode -s ${session_id}"
-    tmux switch-client -t "$session_name"
-  fi
+# ─── Handlers ────────────────────────────────────────────────────────────────
+# Called from tty - cd to directory and exec opencode
+handle_session_tty() {
+	local session_id="$1"
+	directory=$(sqlite3 "$DB_PATH" "SELECT directory FROM session WHERE id = '$session_id';")
+	[[ -z "$directory" ]] && {
+		echo -e "${RED}Not found: $session_id${RESET}"
+		exit 1
+	}
+	[[ ! -d "$directory" ]] && {
+		echo -e "${RED}Missing: $directory${RESET}"
+		exit 1
+	}
+	echo -e "${GREEN}$session_id${RESET}"
+	echo -e "${DIM}$directory${RESET}"
+	cd "$directory" && exec opencode -s "$session_id"
 }
 
-# ─── Main entry point ─────────────────────────────────────────────────────────
+# Called from tmux - create new session and switch to it
+handle_session_tmux_new() {
+	local session_id="$1"
+	directory=$(sqlite3 "$DB_PATH" "SELECT directory FROM session WHERE id = '$session_id';")
+	[[ -z "$directory" ]] && {
+		echo -e "${RED}Not found: $session_id${RESET}"
+		exit 1
+	}
+	[[ ! -d "$directory" ]] && {
+		echo -e "${RED}Missing: $directory${RESET}"
+		exit 1
+	}
 
-case "$MODE" in
-list)
-  run_list
-  ;;
-interactive | copy | multi)
-  run_interactive
-  ;;
-esac
+	session_name=$(derive_repo_name "$directory")
+	use_prefix=$(get_tmux_option "@opencode-sessions-prefix" "false")
+	[[ "$use_prefix" != "false" ]] && session_name="${use_prefix}${session_name}"
+
+	echo -e "${GREEN}$session_id${RESET}"
+	echo -e "${DIM}$directory${RESET}"
+	echo -e "${DIM}Session: $session_name${RESET}"
+
+	if tmux has-session -t "$session_name" 2>/dev/null; then
+		tmux new-window -t "$session_name" -c "$directory" -n "opencode" "exec opencode -s ${session_id}"
+		tmux switch-client -t "$session_name"
+	else
+		tmux new-session -d -s "$session_name" -c "$directory" "exec opencode -s ${session_id}"
+		tmux switch-client -t "$session_name"
+	fi
+}
+
+# Called from tmux with Ctrl-O - open in new window without switching
+handle_session_tmux_new_window() {
+	local session_id="$1"
+	directory=$(sqlite3 "$DB_PATH" "SELECT directory FROM session WHERE id = '$session_id';")
+	[[ -z "$directory" ]] && {
+		echo -e "${RED}Not found: $session_id${RESET}"
+		exit 1
+	}
+	[[ ! -d "$directory" ]] && {
+		echo -e "${RED}Missing: $directory${RESET}"
+		exit 1
+	}
+
+	current_session=$(get_current_tmux_session)
+	echo -e "${GREEN}$session_id${RESET}"
+	echo -e "${DIM}$directory${RESET}"
+	tmux new-window -t "$current_session" -c "$directory" -n "opencode" "exec opencode -s ${session_id}"
+}
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
+
+# Handle --tmux flag: run in tmux popup using fzf's built-in --tmux option
+# Uses interactive mode functions for proper cycling support
+if [[ "$TMUX_POPUP" == "true" ]] && is_in_tmux && [[ "$IS_POPUP" != "true" ]]; then
+	# Always show border by default in --tmux mode
+	border_flag="--border"
+
+	# Set flag to prevent recursive popup spawns
+	export OPENCODE_POPUP=1
+	export OPENCODE_TMUX_POPUP=1
+
+	# Build fzf options for tmux popup - always has border
+	FZF_POPUP_OPTS="--ansi --layout=reverse --tmux ${POPUP_WIDTH},${POPUP_HEIGHT} $border_flag"
+
+	# Handle --directories flag in --tmux mode
+	if [[ "$MODE" == "directories" ]]; then
+		# Run directories view in popup
+		cache_file=$(mktemp)
+		trap 'rm -f "$cache_file"' EXIT
+
+		query_all_directories "$DB_PATH" >"$cache_file"
+		selected=$(format_directory <"$cache_file" | fzf $FZF_POPUP_OPTS \
+			--with-nth 2.. \
+			--border-label " Directories " \
+			--preview "bash '${DIR_PREVIEW_SCRIPT}' {}" \
+			--preview-window "right:50%,border-left" \
+			--delimiter '\t' \
+			--prompt="Select dir: " \
+			--footer "Enter: filter | ?: preview" \
+			--bind "?:toggle-preview" \
+			--bind "enter:execute(echo {1} > /tmp/opencode_dir_select)" \
+			2>/dev/null) || true
+
+		if [[ -n "$selected" ]]; then
+			DIR_FILTER=$(echo "$selected" | cut -f1)
+			# Continue to sessions view with filter
+		else
+			# Check if Enter was pressed to clear filter
+			if [[ -f /tmp/opencode_dir_select ]]; then
+				rm -f /tmp/opencode_dir_select
+				DIR_FILTER=""
+			fi
+		fi
+	fi
+
+	# Cache files for sessions view
+	cache_file=$(mktemp)
+	sorted_file=$(mktemp)
+	trap 'rm -f "$cache_file" "$sorted_file"' EXIT
+
+	# Start the popup loop - use while to allow cycling
+	while true; do
+		# Get sessions data (filtered by DIR_FILTER if set)
+		query_all_sessions "$DB_PATH" "$DAYS_FILTER" "$SHOW_ALL" "$DIR_FILTER" >"$cache_file"
+		sort -t$'\t' -k2,2nr <"$cache_file" >"$sorted_file"
+		mv "$sorted_file" "$cache_file"
+
+		# Build border label - show directory filter if active
+		border_label=" Sessions "
+		[[ -n "$DIR_FILTER" ]] && border_label=" Sessions [$DIR_FILTER] "
+
+		selected=$(format_session <"$cache_file" | fzf $FZF_POPUP_OPTS \
+			--multi \
+			--expect=alt-o,alt-d \
+			--with-nth 2.. \
+			--border-label "$border_label" \
+			--preview "bash '${PREVIEW_SCRIPT}' {}" \
+			--preview-window "right:60%,border-left" \
+			--delimiter '\t' \
+			--prompt="Select: " \
+			--footer "Enter: resume all | Alt-D: toggle | Alt-Y: copy | Alt-O: new-window | TAB: multi-select | ?: preview" \
+			--bind "?:toggle-preview" \
+			--bind "alt-y:execute(echo {1} | $(copy_to_clipboard))" \
+			--bind "alt-o:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new_window \$(echo {} | cut -f1))" \
+			--bind "enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new \$(echo {} | cut -f1))" \
+			2>/dev/null) || true
+
+		[[ -z "$selected" ]] && break
+
+		key_pressed=$(echo "$selected" | head -1)
+		session_lines=$(echo "$selected" | tail -n +2)
+
+		# Handle key actions
+		if [[ "$key_pressed" == "alt-o" ]]; then
+			# Alt-O: new windows for all selected (without switching)
+			while IFS= read -r line; do
+				[[ -z "$line" ]] && continue
+				session_id=$(echo "$line" | cut -f1)
+				handle_session_tmux_new_window "$session_id"
+				sleep 0.3
+			done <<<"$session_lines"
+			break
+		elif [[ "$key_pressed" == "alt-d" ]]; then
+			# Alt-D: switch to directories view
+			query_all_directories "$DB_PATH" >"$cache_file"
+			dir_selected=$(format_directory <"$cache_file" | fzf $FZF_POPUP_OPTS \
+				--with-nth 2.. \
+				--border-label " Directories " \
+				--preview "bash '${DIR_PREVIEW_SCRIPT}' {}" \
+				--preview-window "right:50%,border-left" \
+				--delimiter '\t' \
+				--prompt="Select dir: " \
+				--footer "Enter: filter | Alt-D: toggle | ?: preview" \
+				--bind "?:toggle-preview" \
+				--bind "enter:execute(echo {1} > /tmp/opencode_dir_select)" \
+				2>/dev/null) || true
+
+			if [[ -n "$dir_selected" ]]; then
+				DIR_FILTER=$(echo "$dir_selected" | cut -f1)
+				# Clear filter with Alt-D to toggle back to all sessions
+				# Continue loop to show sessions for this directory
+				continue
+			else
+				# Check if Enter was pressed (set by bind above)
+				if [[ -f /tmp/opencode_dir_select ]]; then
+					rm -f /tmp/opencode_dir_select
+					DIR_FILTER=""
+				fi
+				# No directory selected, stay in sessions view
+				continue
+			fi
+		else
+			# Enter pressed - handle all selected sessions sequentially
+			while IFS= read -r line; do
+				[[ -z "$line" ]] && continue
+				session_id=$(echo "$line" | cut -f1)
+				handle_session_tmux_new "$session_id"
+				sleep 0.3
+			done <<<"$session_lines"
+			break
+		fi
+	done
+	exit 0
+fi
+
+if [[ "$MODE" == "list" ]]; then
+	run_list
+else
+	run_interactive
+fi

@@ -92,3 +92,16 @@ status_priority() {
 	*) echo 2 ;;
 	esac
 }
+
+# Get clipboard copy command
+copy_to_clipboard() {
+	if command -v xclip &>/dev/null; then
+		echo "xclip -selection clipboard"
+	elif command -v wl-copy &>/dev/null; then
+		echo "wl-copy"
+	elif command -v pbcopy &>/dev/null; then
+		echo "pbcopy"
+	else
+		echo "cat"
+	fi
+}

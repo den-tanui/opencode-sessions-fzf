@@ -3,13 +3,16 @@
 #
 # This plugin displays opencode sessions in a tmux popup window
 # and creates/switches to tmux sessions when resuming sessions.
+#
+# Keybinding behavior:
+#   Prefix+o (or custom key) - Open sessions in popup
+#   Alt+D in fzf - Toggle between sessions and directories view
 
 # Get plugin directory dynamically
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Set default options
 set -g @opencode-sessions-days "7"
-set -g @opencode-sessions-sort "time"
 set -g @opencode-sessions-prefix "false"
 set -g @opencode-sessions-popup-height "80%"
 set -g @opencode-sessions-popup-width "80%"
@@ -19,7 +22,6 @@ set -g @opencode-sessions-popup-border "false"
 # FZF options - passed as single string
 set -g @opencode-sessions-fzf-opts "--height 80% --ansi --layout=reverse"
 
-# Key binding - reads options from tmux at runtime
-# Uses -n for no-prefix binding, -B to remove border if configured
-bind-key -n "#{@opencode-sessions-key}" run-shell -b "tmux display-popup #{?@opencode-sessions-popup-border,-B,} -w '#{@opencode-sessions-popup-width}' -h '#{@opencode-sessions-popup-height}' -xC -yC -E ${CURRENT_DIR}/bin/opencode_sessions.sh"
-
+# Key binding - uses --tmux flag so fzf handles popup directly
+# Alt+D in fzf toggles between sessions and directories view
+bind-key -n "#{@opencode-sessions-key}" run-shell -b "${CURRENT_DIR}/bin/opencode_sessions.sh --tmux --width '#{@opencode-sessions-popup-width}' --height '#{@opencode-sessions-popup-height}' --days '#{@opencode-sessions-days}'#{?@opencode-sessions-popup-border, --border,}"
