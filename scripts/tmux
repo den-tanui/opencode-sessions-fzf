@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# tmux helper - create/switch sessions from fzf selection
+# Usage: scripts/tmux --new-window {}
+#        scripts/tmux --session {}
+#
+# Input format (from fzf): session_id  time_ago  repo_name  title
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# Parse flags
+MODE=""
+INPUT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --new-window) MODE="new-window"; shift ;;
+        --session) MODE="session"; shift ;;
+        -) INPUT="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+
+# If no input from pipe, read from argument or stdin
+if [[ -z "$INPUT" ]]; then
+    INPUT=$(cat)
+fi
+
+[[ -z "$INPUT" ]] && exit 0
+
+# Parse fields from input (tab-delimited)
+# Format: session_id<tab>time_ago<tab>name<tab>title
+SESSION_ID=$(echo "$INPUT" | cut -f1)
+TIME_AGO=$(echo "$INPUT" | cut -f2)
+NAME=$(echo "$INPUT" | cut -f3)
+TITLE=$(echo "$INPUT" | cut -f4)
+
+# Get database path
+DB_PATH="${HOME}/.local/share/opencode/opencode.db"
+
+# Query directory from database
+DIRECTORY=$(sqlite3 "$DB_PATH" "SELECT directory FROM session WHERE id = '$SESSION_ID';")
+
+[[ -z "$DIRECTORY" ]] && {
+    echo -e "${RED}Session not found: $SESSION_ID${RESET}"
+    exit 1
+}
+
+[[ ! -d "$DIRECTORY" ]] && {
+    echo -e "${RED}Missing directory: $DIRECTORY}${RESET}"
+    exit 1
+}
+
+# Derive tmux session name from directory
+SESSION_NAME=$(basename "$DIRECTORY")
+if [[ "$DIRECTORY" == *"/.worktrees/"* ]]; then
+    SESSION_NAME=$(basename "${DIRECTORY%%/.worktrees/*}")
+fi
+
+# Also get prefix from tmux option if set
+PREFIX=$(tmux show-option -gqv '@opencode-sessions-prefix' 2>/dev/null || echo "false")
+[[ "$PREFIX" != "false" ]] && SESSION_NAME="${PREFIX}${SESSION_NAME}"
+
+echo -e "${GREEN}${SESSION_ID}${RESET}"
+echo -e "${DIM}${DIRECTORY}${RESET}"
+echo -e "${DIM}Session: ${SESSION_NAME}${RESET}"
+
+if [[ "$MODE" == "new-window" ]]; then
+    # Get current session
+    CURRENT=$(tmux display-message -p '#S' 2>/dev/null || echo "")
+    
+    if [[ -n "$CURRENT" ]]; then
+        tmux new-window -t "$CURRENT" -c "$DIRECTORY" -n "opencode" "exec opencode -s ${SESSION_ID}" 2>/dev/null
+        tmux switch-client -t "$CURRENT"
+        echo -e "${DIM}Opened in new window${RESET}"
+    else
+        echo -e "${RED}Not in tmux${RESET}"
+        exit 1
+    fi
+else
+    # Session mode - create or switch
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        # Session exists - new window
+        tmux new-window -t "$SESSION_NAME" -c "$DIRECTORY" -n "opencode" "exec opencode -s ${SESSION_ID}"
+        tmux switch-client -t "$SESSION_NAME"
+        echo -e "${DIM}New window in existing session${RESET}"
+    else
+        # Create new session
+        tmux new-session -d -s "$SESSION_NAME" -c "$DIRECTORY" "exec opencode -s ${SESSION_ID}"
+        tmux switch-client -t "$SESSION_NAME"
+        echo -e "${DIM}Created new session${RESET}"
+    fi
+fi

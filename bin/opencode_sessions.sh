@@ -347,7 +347,7 @@ run_interactive_sessions() {
 	local enter_action
 	if is_in_tmux; then
 		# In tmux: Enter = create new session and switch to it
-		enter_action="enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new \$(echo {} | cut -f1))"
+		enter_action="enter:execute-silent('${SCRIPT_DIR}/scripts/tmux' --session {})"
 	else
 		# Not in tmux: Enter = cd to directory and exec opencode
 		enter_action="enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tty \$(echo {} | cut -f1))"
@@ -553,8 +553,8 @@ if [[ "$TMUX_POPUP" == "true" ]] && is_in_tmux && [[ "$IS_POPUP" != "true" ]]; t
 			--bind "?:toggle-preview" \
 			--bind "alt-y:execute(echo {1} | $(copy_to_clipboard))" \
 			--bind "alt-d:change-prompt(Dirs> )+reload(bash '${0}' --toggle-view)" \
-			--bind "alt-o:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new_window \$(echo {} | cut -f1))" \
-			--bind "enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new \$(echo {} | cut -f1))" \
+			--bind "alt-o:execute-silent('${SCRIPT_DIR}/scripts/tmux' --new-window {})" \
+			--bind "enter:execute-silent('${SCRIPT_DIR}/scripts/tmux' --session {})" \
 			2>/dev/null) || true
 
 		[[ -z "$selected" ]] && break
