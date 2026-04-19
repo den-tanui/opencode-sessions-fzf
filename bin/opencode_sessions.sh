@@ -90,16 +90,22 @@ invalid_popup_flag() {
 
 # Toggle: cycle through views
 # Toggle: produce the reload command for fzf
-# Returns: bash script that fzf will run via reload
 # default ↔ --directories ↔ --dir
 get_toggle_cmd() {
 	if [[ -n "$DIR_FILTER" ]]; then
 		# Was in filtered sessions (--dir), go to directories
 		echo "bash '${0}' --directories"
 	elif [[ "$MODE" == "directories" ]]; then
-		# Was in directories, go to sessions with that dir (or default)
-		if [[ -n "$DIR_FROM_DIRECTORIES" ]]; then
-			echo "bash '${0}' --dir '${DIR_FROM_DIRECTORIES}'"
+		# Was in directories, go back to the default (or the previously selected dir would be filtered)
+		# Check if there's a cached dir from temp file
+		if [[ -f /tmp/opencode_selected_dir ]]; then
+			local cached_dir
+			cached_dir=$(cat /tmp/opencode_selected_dir 2>/dev/null)
+			if [[ -n "$cached_dir" ]]; then
+				echo "bash '${0}' --dir '${cached_dir}'"
+			else
+				echo "bash '${0}'"
+			fi
 		else
 			echo "bash '${0}'"
 		fi
@@ -145,10 +151,6 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--dir)
 		DIR_FILTER="$2"
-		shift 2
-		;;
-	--dir-from-directories)
-		DIR_FROM_DIRECTORIES="$2"
 		shift 2
 		;;
 	--days)
@@ -278,8 +280,8 @@ run_interactive_directories() {
 
 	# For directories: Enter to view sessions in that directory
 	# Alt-D to return to default sessions view
-	footer="Enter: filter sessions | Alt-D: return | ?: preview"
-	local enter_cmd="enter:change-prompt(Sessions> )+reload(bash '${0}' --dir-from-directories '\$(echo {} | cut -f1)')"
+	header="alt-d: sessions | ?: preview"
+	local enter_cmd="enter:change-prompt(Sessions> )+reload(bash '${0}' --dir '\$(echo {} | cut -f1)')"
 	local selected
 	selected=$(format_directory <"$cache_file" | fzf \
 		$FZF_OPTS \
@@ -304,15 +306,16 @@ run_interactive_directories() {
 
 	[[ -z "$directory" ]] && exit 0
 
+	# Store directory for toggle back
+	echo "$directory" > /tmp/opencode_selected_dir
+
 	# Handle Alt-D toggle (return to default)
 	if [[ "$key_pressed" == "alt-d" ]]; then
-		export DIR_FROM_DIRECTORIES="$directory"
 		eval $(get_toggle_cmd)
 		exit 0
 	fi
 
 	# Enter pressed - reload to sessions filtered by this directory
-	export DIR_FROM_DIRECTORIES="$directory"
 	exec bash "${0}" --dir "$directory"
 }
 
@@ -352,14 +355,16 @@ run_interactive_sessions() {
 
 	# Custom prompt for directory-filtered view
 	local prompt="Select: "
-	local border_label=" Sessions "
+local border_label=" Sessions "
+	local header="alt-d: directories | ?: preview"
 	if [[ -n "$dir_filter" ]]; then
 		local short_dir="${dir_filter##*/}"
 		prompt="[${short_dir}] "
 		border_label=" Sessions [${short_dir}] "
+		header="alt-d: directories | ?: preview"
 	fi
 
-	footer="Enter: resume | Alt-D: directories | Alt+Y: copy | ?: preview"
+	footer="Enter: resume | Alt+Y: copy | ?: preview"
 
 	local selected
 	selected=$(
@@ -368,13 +373,14 @@ run_interactive_sessions() {
 			--expect=ctrl-o \
 			--with-nth 2.. \
 			--border-label "$border_label" \
+			--header "$header" \
 			--preview "bash '${PREVIEW_SCRIPT}' {}" \
 			--preview-window "right:60%,border-left" \
 			--delimiter '\t' \
 			--prompt="$prompt" \
 			--footer "$footer" \
 			--bind "?:toggle-preview" \
---bind "alt-d:change-prompt(Dirs> )+reload(bash '${0}' --toggle-view)" \
+			--bind "alt-d:change-prompt(Dirs> )+reload(bash '${0}' --toggle-view)" \
 			--bind "alt-y:execute(echo {1} | $(copy_to_clipboard))" \
 			--bind "$enter_action" \
 			2>/dev/null
@@ -529,20 +535,24 @@ if [[ "$TMUX_POPUP" == "true" ]] && is_in_tmux && [[ "$IS_POPUP" != "true" ]]; t
 
 		# Build border label - show directory filter if active
 		border_label=" Sessions "
-		[[ -n "$DIR_FILTER" ]] && border_label=" Sessions [$DIR_FILTER] "
+		header="alt-d: directories | ?: preview"
+		prompt="Select: "
+		[[ -n "$DIR_FILTER" ]] && border_label=" Sessions " && header="alt-d: directories | ?: preview"
 
 		selected=$(format_session <"$cache_file" | fzf $FZF_POPUP_OPTS \
 			--multi \
-			--expect=alt-o,alt-d \
+			--expect=alt-o \
 			--with-nth 2.. \
 			--border-label "$border_label" \
+			--header "$header" \
 			--preview "bash '${PREVIEW_SCRIPT}' {}" \
 			--preview-window "right:60%,border-left" \
 			--delimiter '\t' \
-			--prompt="Select: " \
-			--footer "Enter: resume all | Alt-D: toggle | Alt-Y: copy | Alt-O: new-window | TAB: multi-select | ?: preview" \
+			--prompt="$prompt" \
+			--footer "Enter: resume | Alt+Y: copy | Alt-O: new-window | TAB: multi-select | ?: preview" \
 			--bind "?:toggle-preview" \
 			--bind "alt-y:execute(echo {1} | $(copy_to_clipboard))" \
+			--bind "alt-d:change-prompt(Dirs> )+reload(bash '${0}' --toggle-view)" \
 			--bind "alt-o:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new_window \$(echo {} | cut -f1))" \
 			--bind "enter:execute-silent(source '${SCRIPT_DIR}/lib/db.sh' && source '${SCRIPT_DIR}/lib/helpers.sh' && DB_PATH='${DB_PATH}' handle_session_tmux_new \$(echo {} | cut -f1))" \
 			2>/dev/null) || true
