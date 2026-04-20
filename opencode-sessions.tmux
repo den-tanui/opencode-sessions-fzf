@@ -5,7 +5,7 @@
 # and creates/switches to tmux sessions when resuming sessions.
 #
 # Keybinding behavior:
-#   Prefix+Z (or custom key) - Open sessions in popup
+#   Prefix+O (or custom key) - Open sessions in popup
 #   Alt+D in fzf - Toggle between sessions and directories view
 
 # Get plugin directory dynamically
@@ -38,5 +38,5 @@ OPENCODE_CMD="$OPENCODE_CMD --height '$OPENCODE_HEIGHT'"
 OPENCODE_CMD="$OPENCODE_CMD --days '$OPENCODE_DAYS'"
 [ "$OPENCODE_BORDER" = "true" ] && OPENCODE_CMD="$OPENCODE_CMD --border"
 
-# Bind the key (using tmux bind-key command)
-tmux bind-key -n "$OPENCODE_KEY" run-shell -b "$OPENCODE_CMD"
+# Bind the key (using tmux bind-key command - requires prefix)
+tmux bind-key "$OPENCODE_KEY" run-shell -b "$OPENCODE_CMD"
