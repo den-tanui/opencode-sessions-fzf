@@ -5,23 +5,38 @@
 # and creates/switches to tmux sessions when resuming sessions.
 #
 # Keybinding behavior:
-#   Prefix+o (or custom key) - Open sessions in popup
+#   Prefix+Z (or custom key) - Open sessions in popup
 #   Alt+D in fzf - Toggle between sessions and directories view
 
 # Get plugin directory dynamically
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set default options
-set -g @opencode-sessions-days "7"
-set -g @opencode-sessions-prefix "false"
-set -g @opencode-sessions-popup-height "80%"
-set -g @opencode-sessions-popup-width "80%"
-set -g @opencode-sessions-key "o"
-set -g @opencode-sessions-popup-border "false"
+# Read options with defaults (using tmux commands like working plugins)
+OPENCODE_DAYS="$(tmux show-option -gqv @opencode-sessions-days)"
+[ -z "$OPENCODE_DAYS" ] && OPENCODE_DAYS="7"
 
-# FZF options - passed as single string
-set -g @opencode-sessions-fzf-opts "--height 80% --ansi --layout=reverse"
+OPENCODE_KEY="$(tmux show-option -gqv @opencode-sessions-key)"
+[ -z "$OPENCODE_KEY" ] && OPENCODE_KEY="z"
 
-# Key binding - uses --tmux flag so fzf handles popup directly
-# Alt+D in fzf toggles between sessions and directories view
-bind-key -n "#{@opencode-sessions-key}" run-shell -b "${CURRENT_DIR}/bin/opencode_sessions.sh --tmux --width '#{@opencode-sessions-popup-width}' --height '#{@opencode-sessions-popup-height}' --days '#{@opencode-sessions-days}'#{?@opencode-sessions-popup-border, --border,}"
+OPENCODE_HEIGHT="$(tmux show-option -gqv @opencode-sessions-popup-height)"
+[ -z "$OPENCODE_HEIGHT" ] && OPENCODE_HEIGHT="80%"
+
+OPENCODE_WIDTH="$(tmux show-option -gqv @opencode-sessions-popup-width)"
+[ -z "$OPENCODE_WIDTH" ] && OPENCODE_WIDTH="80%"
+
+OPENCODE_BORDER="$(tmux show-option -gqv @opencode-sessions-popup-border)"
+[ -z "$OPENCODE_BORDER" ] && OPENCODE_BORDER="false"
+
+# FZF options
+OPENCODE_FZF_OPTS="$(tmux show-option -gqv @opencode-sessions-fzf-opts)"
+[ -z "$OPENCODE_FZF_OPTS" ] && OPENCODE_FZF_OPTS="--height 80% --ansi --layout=reverse"
+
+# Build the command with options
+OPENCODE_CMD="${CURRENT_DIR}/bin/opencode_sessions.sh --tmux"
+OPENCODE_CMD="$OPENCODE_CMD --width '$OPENCODE_WIDTH'"
+OPENCODE_CMD="$OPENCODE_CMD --height '$OPENCODE_HEIGHT'"
+OPENCODE_CMD="$OPENCODE_CMD --days '$OPENCODE_DAYS'"
+[ "$OPENCODE_BORDER" = "true" ] && OPENCODE_CMD="$OPENCODE_CMD --border"
+
+# Bind the key (using tmux bind-key command)
+tmux bind-key -n "$OPENCODE_KEY" run-shell -b "$OPENCODE_CMD"
