@@ -16,7 +16,7 @@ OPENCODE_DAYS="$(tmux show-option -gqv @opencode-sessions-days)"
 [ -z "$OPENCODE_DAYS" ] && OPENCODE_DAYS="7"
 
 OPENCODE_KEY="$(tmux show-option -gqv @opencode-sessions-key)"
-[ -z "$OPENCODE_KEY" ] && OPENCODE_KEY="z"
+[ -z "$OPENCODE_KEY" ] && OPENCODE_KEY="o"
 
 OPENCODE_HEIGHT="$(tmux show-option -gqv @opencode-sessions-popup-height)"
 [ -z "$OPENCODE_HEIGHT" ] && OPENCODE_HEIGHT="80%"
