@@ -37,4 +37,4 @@ OPENCODE_CMD="$OPENCODE_CMD --days '$OPENCODE_DAYS'"
 [ "$OPENCODE_BORDER" = "true" ] && OPENCODE_CMD="$OPENCODE_CMD --border"
 
 # Bind the key to open in tmux popup window
-tmux bind-key "$OPENCODE_KEY" display-popup -d '#{pane_id}' -S "$OPENCODE_HEIGHT" -s "$OPENCODE_WIDTH" -E "$OPENCODE_CMD"
+tmux bind-key "$OPENCODE_KEY" display-popup -d '#{pane_id}' -w "$OPENCODE_WIDTH" -h "$OPENCODE_HEIGHT" -E "$OPENCODE_CMD"
