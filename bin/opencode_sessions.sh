@@ -78,7 +78,8 @@ for arg in "$@"; do
 done
 
 # Auto-detect tmux: if running inside tmux and --tmux not explicitly passed, use popup mode
-if is_in_tmux && [[ "$TMUX_FLAG_SEEN" != "true" ]]; then
+# But NOT when already in a tmux popup (TMUX_POPUP env is set by tmux for popups)
+if is_in_tmux && [[ "$TMUX_FLAG_SEEN" != "true" ]] && [[ -z "${TMUX_POPUP:-}" ]]; then
 	TMUX_POPUP=true
 fi
 
