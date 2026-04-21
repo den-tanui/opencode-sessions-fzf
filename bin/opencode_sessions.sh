@@ -541,7 +541,7 @@ if [[ "$TMUX_POPUP" == "true" ]] && is_in_tmux && [[ "$IS_POPUP" != "true" ]]; t
 
 		selected=$(format_session <"$cache_file" | fzf $FZF_POPUP_OPTS \
 			--multi \
-			--expect=alt-o \
+			--expect=alt-o,enter \
 			--with-nth 2.. \
 			--border-label "$border_label" \
 			--header "$header" \
@@ -553,8 +553,8 @@ if [[ "$TMUX_POPUP" == "true" ]] && is_in_tmux && [[ "$IS_POPUP" != "true" ]]; t
 			--bind "?:toggle-preview" \
 			--bind "alt-y:execute(echo {1} | $(copy_to_clipboard))" \
 			--bind "alt-d:change-prompt(Dirs> )+reload(bash '${0}' --toggle-view)" \
-			--bind "alt-o:execute-silent('${SCRIPT_DIR}/scripts/tmux' --new-window {})" \
-			--bind "enter:execute-silent('${SCRIPT_DIR}/scripts/tmux' --session {})" \
+			--bind "alt-o:execute-silent('${SCRIPT_DIR}/scripts/tmux' --new-window --quiet {})" \
+			--bind "enter:execute-silent('${SCRIPT_DIR}/scripts/tmux' --session --quiet {})" \
 			2>/dev/null) || true
 
 		[[ -z "$selected" ]] && break
@@ -569,6 +569,15 @@ if [[ "$TMUX_POPUP" == "true" ]] && is_in_tmux && [[ "$IS_POPUP" != "true" ]]; t
 				[[ -z "$line" ]] && continue
 				session_id=$(echo "$line" | cut -f1)
 				handle_session_tmux_new_window "$session_id"
+				sleep 0.3
+			done <<<"$session_lines"
+			break
+		elif [[ "$key_pressed" == "enter" ]]; then
+			# Enter: create/switch to session for each selected
+			while IFS= read -r line; do
+				[[ -z "$line" ]] && continue
+				session_id=$(echo "$line" | cut -f1)
+				handle_session_tmux_new "$session_id"
 				sleep 0.3
 			done <<<"$session_lines"
 			break

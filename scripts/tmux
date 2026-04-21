@@ -16,15 +16,22 @@ RESET='\033[0m'
 # Parse flags
 MODE=""
 INPUT=""
+QUIET=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --new-window) MODE="new-window"; shift ;;
         --session) MODE="session"; shift ;;
+        --quiet|-q) QUIET=true; shift ;;
         -) INPUT="$1"; shift ;;
         *) shift ;;
     esac
 done
+
+# Suppress output when --quiet (called via fzf execute-silent)
+if [[ "$QUIET" == "true" ]]; then
+    exec 2>/dev/null
+fi
 
 # If no input from pipe, read from argument or stdin
 if [[ -z "$INPUT" ]]; then
@@ -66,9 +73,13 @@ fi
 PREFIX=$(tmux show-option -gqv '@opencode-sessions-prefix' 2>/dev/null || echo "false")
 [[ "$PREFIX" != "false" ]] && SESSION_NAME="${PREFIX}${SESSION_NAME}"
 
-echo -e "${GREEN}${SESSION_ID}${RESET}"
-echo -e "${DIM}${DIRECTORY}${RESET}"
-echo -e "${DIM}Session: ${SESSION_NAME}${RESET}"
+# Output only when NOT called via fzf execute-silent (check for pipe/no-tty)
+# When execute-silent calls script, stdin is from fzf but stdout is not a tty
+if [[ -t 0 || -t 1 ]]; then
+    echo -e "${GREEN}${SESSION_ID}${RESET}"
+    echo -e "${DIM}${DIRECTORY}${RESET}"
+    echo -e "${DIM}Session: ${SESSION_NAME}${RESET}"
+fi
 
 if [[ "$MODE" == "new-window" ]]; then
     # Get current session
