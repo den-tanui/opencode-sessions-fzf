@@ -31,12 +31,10 @@ OPENCODE_BORDER="$(tmux show-option -gqv @opencode-sessions-popup-border)"
 OPENCODE_FZF_OPTS="$(tmux show-option -gqv @opencode-sessions-fzf-opts)"
 [ -z "$OPENCODE_FZF_OPTS" ] && OPENCODE_FZF_OPTS="--height 80% --ansi --layout=reverse"
 
-# Build the command with options
-OPENCODE_CMD="${CURRENT_DIR}/bin/opencode_sessions.sh --tmux"
-OPENCODE_CMD="$OPENCODE_CMD --width '$OPENCODE_WIDTH'"
-OPENCODE_CMD="$OPENCODE_CMD --height '$OPENCODE_HEIGHT'"
+# Build the command (without --tmux flag since tmux popup handles that)
+OPENCODE_CMD="${CURRENT_DIR}/bin/opencode_sessions.sh"
 OPENCODE_CMD="$OPENCODE_CMD --days '$OPENCODE_DAYS'"
 [ "$OPENCODE_BORDER" = "true" ] && OPENCODE_CMD="$OPENCODE_CMD --border"
 
-# Bind the key (using tmux bind-key command - requires prefix)
-tmux bind-key "$OPENCODE_KEY" run-shell -b "$OPENCODE_CMD"
+# Bind the key to open in tmux popup window
+tmux bind-key "$OPENCODE_KEY" display-popup -d '#{pane_id}' -S "$OPENCODE_HEIGHT" -s "$OPENCODE_WIDTH" -E "$OPENCODE_CMD"
